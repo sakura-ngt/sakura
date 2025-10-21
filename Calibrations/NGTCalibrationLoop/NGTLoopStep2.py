@@ -10,6 +10,12 @@ from pathlib import Path
 
 from transitions import Machine, State
 
+from omsapi import OMSAPI
+
+# Global variables
+CURRENT_RUN = ""
+LAST_LS = None
+
 class NGTLoopStep2(object):
 
     # Define some states.
@@ -28,7 +34,7 @@ class NGTLoopStep2(object):
         runNumber = self.runNumber
         print(f"Run {runNumber} has started!")
         # We live in directory /tmp/ngt.
-        p = Path(f"/tmp/ngt_jp/run{runNumber}")
+        p = Path(f"/tmp/ngt_mm/run{runNumber}")
         p.mkdir(parents=True, exist_ok=True)
         self.workingDir = str(p)
         # We assert the run start time for us as "now" in UTC
@@ -44,15 +50,62 @@ class NGTLoopStep2(object):
     # FIXME: to be substituted with some code to check if DAQ is running
     # Right now we have a dummy check!
     # Should also check if the run is good for runs (e.g. only pp run?)
+    # def DAQIsRunning(self):
+    #     print("Testing if DAQ is running...")
+    #     weAreRunning = Path("running.txt").exists()
+    #     if weAreRunning:
+    #         print("We are running!")
+    #         self.runNumber = self.GetRunNumber()
+    #     else:
+    #         print("We are not running...")
+    #     return weAreRunning
+
+
     def DAQIsRunning(self):
-        print("Testing if DAQ is running...")
-        weAreRunning = Path("running.txt").exists()
-        if weAreRunning:
-            print("We are running!")
-            self.runNumber = self.GetRunNumber()
+        global CURRENT_RUN, LAST_LS
+
+        print("Checking DAQ status via OMS...")
+
+        omsapi = OMSAPI("https://cmsoms.cms/agg/api", "v1", cert_verify=False)
+
+        # Create and execute query
+        q = omsapi.query("runs")
+        q.paginate(page=1, per_page=1).sort("run_number", asc=False)
+        response = q.data().json()
+
+        # Parse the most recent run
+        if "data" not in response or not response["data"]:
+            print("No run information found in OMS.")
+            return False
+
+        run_info = response["data"][0]["attributes"]
+        run_number = run_info.get("run_number")
+        LAST_LS = run_info.get("last_lumisection_number")
+
+        # Convert run number to XXX/YYY format (if numeric and 6 digits)
+        if isinstance(run_number, int):
+            run_str = str(run_number)
+            if len(run_str) == 6:
+                CURRENT_RUN = f"{run_str[:3]}/{run_str[3:]}"
+            else:
+                CURRENT_RUN = run_str  # fallback if not 6 digits
         else:
-            print("We are not running...")
-        return weAreRunning
+            CURRENT_RUN = str(run_number)
+        
+        print(f"Most recent run: {CURRENT_RUN}, last LS: {LAST_LS}")
+
+        self.pathWhereFilesAppear = "/eos/cms/tier0/store/data/Run2025G/TestEnablesEcalHcal/RAW/Express-v1/000/"+CURRENT_RUN+"/00000"
+        
+        # Decide if DAQ is "running"
+        # (heuristic: end_time == None → still running)
+        is_running = run_info.get("end_time") is None
+
+        if is_running:
+            print("DAQ appears to be running!")
+        else:
+            print("DAQ is not running (run has ended).")
+            
+        return is_running
 
     def edmFileUtilCommand(self, filename):
         #for now it only works with one file, rewrite to also give out for several files..!
@@ -290,11 +343,12 @@ class NGTLoopStep2(object):
         self.requestMinimumLS = True
         self.waitingLS = False
         self.enoughLS = False
-        self.pathWhereFilesAppear = "/eos/cms/tier0/store/data/Run2025G/TestEnablesEcalHcal/RAW/Express-v1/000/398/390/00000"
+        self.pathWhereFilesAppear = "/eos/cms/tier0/store/data/Run2025G/TestEnablesEcalHcal/RAW/Express-v1/000/"+CURRENT_RUN+"/00000"
+        print("self.pathWhereFilesAppear",self.pathWhereFilesAppear)
         self.workingDir = "/dev/null"
         self.preparedFinalLS = False
         # Read some configurations
-        with open("/tmp/ngt_jp/ngtParameters.jsn", "r") as f:
+        with open("/tmp/ngt_mm/ngtParameters.jsn", "r") as f:
             config = json.load(f)
         self.scramArch = config["SCRAM_ARCH"]
         self.cmsswVersion = config["CMSSW_VERSION"]
